@@ -1,5 +1,4 @@
 name: Market News Sync
-
 on:
   workflow_dispatch:
   schedule:
@@ -7,34 +6,58 @@ on:
   push:
     paths:
       - '.github/workflows/sync-news.yml'
-
 permissions:
   contents: write
-
+concurrency:
+  group: market-news-sync
+  cancel-in-progress: false
 jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 3
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download news
+      - name: Download public news
         run: |
           curl -fsSL --max-time 30 https://investitsionnyy-shtab.vercel.app/api/control -o /tmp/news.json
-
           python3 - <<'PY'
           import json
           import re
           from pathlib import Path
           from datetime import datetime
+          from urllib.parse import urlparse
 
-          data = json.loads(Path('/tmp/news.json').read_text())
+          data = json.loads(Path('/tmp/news.json').read_text(encoding='utf-8'))
           fields = ['tickers', 'level', 'title', 'fact', 'impact', 'source', 'url']
+          private = re.compile(r'иде[яиюе]\s*№|дол[яиюе]\s+друга|личн\w*\s+капитал|рубл[её]в\w*\s+остаток|тво[яией]|брокерск\w*\s+сч[её]т|наш\w*\s+позици|резерв\s*№', re.I)
           items = []
-
           for item in data['items']:
-              row = {k: item[k] for k in fields}
+              row = {k: item.get(k) for k in fields}
               if not all(isinstance(v, str) for v in row.values()):
                   continue
-              if re.search(r'иде[яиюе]\s*№|
+              if private.search(json.dumps(row, ensure_ascii=False)):
+                  continue
+              u = urlparse(row['url'])
+              if u.scheme != 'https' or not u.hostname:
+                  continue
+              row['action'] = 'Проверить первоисточник.'
+              items.append(row)
+          assert 1 <= len(items) <= 6, 'No valid public report'
+          assert isinstance(data['at'], str) and not private.search(data['at'])
+          stamp = datetime.fromisoformat(data['publishedAt'].replace('Z', '+00:00'))
+          assert stamp.tzinfo is not None
+          path = Path('control.json')
+          if path.exists():
+              old = json.loads(path.read_text(encoding='utf-8'))
+              if datetime.fromisoformat(old['publishedAt'].replace('Z', '+00:00')) >= stamp:
+                  raise SystemExit(0)
+          result = {'at': data['at'], 'publishedAt': data['publishedAt'], 'items': items}
+          path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          PY
+      - name: Save news
+        run: |
+          git config user.name "Market News Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add control.json
+          git diff --cached --quiet || git commit -m "Update market news"
+          git push
