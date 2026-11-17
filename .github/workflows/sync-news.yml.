@@ -1,1 +1,74 @@
-.github/workflows/sync-news.yml.
+name: Market News Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 * * * *'
+  push:
+    paths:
+      - '.github/workflows/sync-news.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-news-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download news
+        run: |
+          curl -fsSL --max-time 30 \
+            https://investitsionnyy-shtab.vercel.app/api/control \
+            -o /tmp/news.json
+
+          python3 - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+          from datetime import datetime
+
+          data = json.loads(Path('/tmp/news.json').read_text())
+          fields = ['tickers', 'level', 'title', 'fact',
+                    'impact', 'source', 'url']
+          items = []
+
+          for item in data['items']:
+              row = {k: item[k] for k in fields}
+              if not all(isinstance(v, str) for v in row.values()):
+                  continue
+              if re.search(r'иде[яиюе]\s*№|тво[яией]|доля друга|личный капитал|рублёвый остаток', json.dumps(row, ensure_ascii=False), re.I):
+                  continue
+              if not row['url'].startswith('https://'):
+                  continue
+              row['action'] = 'Проверить первоисточник.'
+              items.append(row)
+
+          assert items
+          stamp = datetime.fromisoformat(data['publishedAt'])
+          path = Path('control.json')
+
+          if path.exists():
+              old = json.loads(path.read_text())
+              if datetime.fromisoformat(old['publishedAt']) >= stamp:
+                  raise SystemExit(0)
+
+          result = {
+              'at': data['at'],
+              'publishedAt': data['publishedAt'],
+              'items': items
+          }
+          path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          PY
+
+      - name: Save news
+        run: |
+          git config user.name "Market News Bot"
+          git config user.email "
